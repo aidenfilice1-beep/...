@@ -3,14 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy"
-          content="default-src 'self' https: data: blob: 'unsafe-inline';
-                   script-src 'self' https: 'unsafe-inline' 'unsafe-eval';
-                   style-src 'self' https: 'unsafe-inline';
-                   connect-src 'self' https:;">
-    <title>Starship Combat Arena (60 Ships)</title>
+    <title>Starship Arena (Clean Audio)</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@700&display=swap');
         body { background-color: #0d1117; font-family: 'Chakra Petch', sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; overflow: hidden; }
@@ -37,19 +31,22 @@
         .ship-card { background-color: #1f2733; border: 1px solid #334d60; border-radius: 10px; padding: 1rem; display: flex; flex-direction: column; align-items: center; transition: all 0.3s; }
         .ship-card.equipped { border: 3px solid #39ff14; transform: scale(1.05); box-shadow: 0 0 30px #39ff14; }
         .ship-card:not(.equipped):hover { transform: translateY(-8px); border-color: #00ffff; }
+        .ship-card[data-glow] { border: 2px solid var(--glow-color); box-shadow: 0 0 10px var(--glow-color); }
+        .ship-card.equipped[data-glow] { box-shadow: 0 0 30px var(--glow-color); }
+        .game-info { position: absolute; top: 4px; left: 4px; right: 4px; display: flex; gap: 20px; flex-wrap: wrap; align-items: center; pointer-events: none; }
+        .game-info > div { font-size: 1.2rem; font-weight: bold; padding: 6px 10px; border-radius: 8px; background: rgba(0, 0, 0, 0.6); pointer-events: auto; }
         
-        /* Utility to show ship glow */
-        .ship-card[data-glow] { 
-            border: 2px solid var(--glow-color); 
-            box-shadow: 0 0 10px var(--glow-color); 
+        @keyframes pulse-green {
+            0%, 100% { text-shadow: 0 0 5px #39ff14; transform: scale(1); }
+            50% { text-shadow: 0 0 20px #39ff14; transform: scale(1.1); }
         }
-        .ship-card.equipped[data-glow] { 
-            box-shadow: 0 0 30px var(--glow-color);
+        .afford-alert {
+            color: #39ff14;
+            border: 1px solid #39ff14 !important;
+            animation: pulse-green 1.5s infinite;
+            display: none; 
         }
-        .text-player-color { color: var(--player-color); }
-        .text-player-glow { text-shadow: 0 0 5px var(--player-glow); }
-        .game-info { position: absolute; top: 4px; left: 4px; display: flex; gap: 20px; }
-        .game-info > div { font-size: 1.5rem; font-weight: bold; padding: 8px 12px; border-radius: 8px; background: rgba(0, 0, 0, 0.4); }
+        .afford-visible { display: block !important; }
     </style>
 </head>
 <body>
@@ -57,8 +54,10 @@
         <canvas id="gameCanvas" class="w-full h-full"></canvas>
         <div class="game-info">
             <div id="livesDisplay" class="text-red-400">LIVES: 3</div>
+            <div id="waveDisplay" class="text-purple-400">WAVE: 1</div>
             <div id="scoreDisplay" class="text-cyan-400">TIME: 0.00s</div>
             <div id="coinDisplay" class="text-yellow-400">COINS: 0</div>
+            <div id="affordDisplay" class="afford-alert">NEXT SHIP AFFORDABLE!</div>
         </div>
         
         <div id="overlay">
@@ -91,17 +90,22 @@
     </div>
 
     <script>
-        const isAuthReady = true;
-        const userId = "local-user";
         let coins = 0, sessionCoins = 0, equippedShipId = 'vanguard', ownedShipIds = ['vanguard'];
         let weaponSlots = 1; 
-        let lastCoinUpdateTime = 0;
+        let nextShipPrice = Infinity; 
+
+        // --- WAVE SYSTEM VARIABLES ---
+        let currentWave = 1;
+        let killsInCurrentWave = 0;
+        const KILLS_TO_ADVANCE_WAVE = 6;
 
         const canvas = document.getElementById('gameCanvas');
         const ctx = canvas.getContext('2d');
         const livesDisplay = document.getElementById('livesDisplay');
+        const waveDisplay = document.getElementById('waveDisplay');
         const scoreDisplay = document.getElementById('scoreDisplay');
         const coinDisplay = document.getElementById('coinDisplay');
+        const affordDisplay = document.getElementById('affordDisplay');
         const totalCoinsMessage = document.getElementById('totalCoinsMessage');
         const overlay = document.getElementById('overlay');
         const standardOverlay = document.getElementById('standardOverlay');
@@ -114,10 +118,9 @@
         const shipList = document.getElementById('shipList');
         const upgradeList = document.getElementById('upgradeList');
         const shopCoinBalance = document.getElementById('shopCoinBalance');
-
-        let isConsoleOpen = false;
         const cheatConsole = document.getElementById('cheatConsole');
         const consoleInput = document.getElementById('consoleInput');
+        let isConsoleOpen = false;
 
         // --- GAME CONSTANTS ---
         const INITIAL_PLAYER_LIVES = 3;
@@ -126,35 +129,71 @@
         const ROTATION_SPEED = 0.15;
         const MAX_ROTATION = Math.PI / 8;
         const SPREAD_ANGLE_RADIANS = 0.05; 
-        const PLAYER_INVULNERABILITY_TIME = 2000; // 2 seconds
+        const PLAYER_INVULNERABILITY_TIME = 2000; 
 
         // --- GAME STATE ---
         let gameRunning = false;
+        let animationFrameId = null;
         let player = { x: 0, y: 0, dx: 0, dy: 0, speed: 5, rotation: 0, particles: [], isInvulnerable: false, invulnTimer: 0 };
         let playerLives = INITIAL_PLAYER_LIVES;
         let enemies = [], projectiles = [], enemyProjectiles = [];
-        let score = 0, lastTime = 0, spawnTimer = 0, spawnInterval = 2000;
-        let lastHitSoundTime = 0, keys = {};
+        let score = 0, lastTime = 0, spawnTimer = 0; 
+        let keys = {};
 
-        // --- AUDIO STATE ---
-        let isToneInitialized = false;
-        let noiseSynth = null, laserSynth = null, hitSynth = null, enemyLaserSynth = null, lifeLostSynth = null;
-        let audioUnlocked = false;
+        // --- NEW SIMPLE AUDIO SYSTEM ---
+        let audioCtx = null;
 
-        // --- SHIP DATA GENERATION ---
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        }
 
+        function playSound(type) {
+            if (!audioCtx) return;
+            
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            if (type === 'shoot') {
+                // High pitch rapid decay (pew)
+                osc.type = 'square';
+                osc.frequency.setValueAtTime(600, audioCtx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(200, audioCtx.currentTime + 0.1);
+                gain.gain.setValueAtTime(0.05, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.1);
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.1);
+            } else if (type === 'hit') {
+                // Low pitch noise-like (boom)
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+                gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.2);
+            }
+        }
+
+        // --- SHIP DATA GENERATION (PRICES INCREASED) ---
         const RARITIES = {
             'vanguard': { multiplier: 1, color: '#40e0d0', glow: '#00ffff', basePrice: 0 },
-            'Uncommon': { multiplier: 2, color: '#8b0000', glow: '#ff0000', basePrice: 30 },
-            'Rare': { multiplier: 3, color: '#9400d3', glow: '#ee82ee', basePrice: 100 },
-            'Epic': { multiplier: 4, color: '#daa520', glow: '#ffff00', basePrice: 250 },
-            'Legendary': { multiplier: 5, color: '#ffffff', glow: '#00bfff', basePrice: 500 },
-            'Mythic': { multiplier: 6, color: '#39ff14', glow: '#39ff14', basePrice: 1000 },
-            'Cosmic': { multiplier: 8, color: '#0a001f', glow: '#ff00ff', basePrice: 2500 },
-            'Eternal': { multiplier: 10, color: '#ff8800', glow: '#ff8800', basePrice: 5000 },
-            'Apocalypse': { multiplier: 12, color: '#1a0033', glow: '#8a2be2', basePrice: 10000 },
-            'Galactic': { multiplier: 15, color: '#ff0066', glow: '#ff0066', basePrice: 25000 },
-            'Divine': { multiplier: 20, color: '#ff1a1a', glow: '#ff0066', basePrice: 50000 }
+            'Uncommon': { multiplier: 2, color: '#8b0000', glow: '#ff0000', basePrice: 150 },
+            'Rare': { multiplier: 3, color: '#9400d3', glow: '#ee82ee', basePrice: 750 },
+            'Epic': { multiplier: 4, color: '#daa520', glow: '#ffff00', basePrice: 2000 },
+            'Legendary': { multiplier: 5, color: '#ffffff', glow: '#00bfff', basePrice: 5000 },
+            'Mythic': { multiplier: 6, color: '#39ff14', glow: '#39ff14', basePrice: 12000 },
+            'Cosmic': { multiplier: 8, color: '#0a001f', glow: '#ff00ff', basePrice: 30000 },
+            'Eternal': { multiplier: 10, color: '#ff8800', glow: '#ff8800', basePrice: 75000 },
+            'Apocalypse': { multiplier: 12, color: '#1a0033', glow: '#8a2be2', basePrice: 150000 },
+            'Galactic': { multiplier: 15, color: '#ff0066', glow: '#ff0066', basePrice: 300000 },
+            'Divine': { multiplier: 20, color: '#ff1a1a', glow: '#ff0066', basePrice: 1000000 }
         };
 
         const SHAPE_TYPES = ['ARROW', 'DELTA', 'CRUCIFORM', 'BOX', 'WING', 'STAR', 'U-SHAPE', 'SPHERE'];
@@ -164,11 +203,9 @@
             let ships = [];
             const rarityKeys = Object.keys(RARITIES);
             
-            // Add the initial 10 base ships
             for (let i = 0; i < 10; i++) {
                 const rarityKey = i === 0 ? 'vanguard' : rarityKeys[Math.floor(i / 2) + 1];
                 const rarity = RARITIES[rarityKey];
-                
                 ships.push({
                     id: SHIP_NAMES[i].toLowerCase().replace(' ', '-'),
                     name: SHIP_NAMES[i],
@@ -176,7 +213,6 @@
                     multiplier: rarity.multiplier,
                     price: rarity.basePrice,
                     damage: Math.max(1, Math.floor(rarity.multiplier * 5 * (i === 0 ? 0.2 : 1))),
-                    // Simplified initial shapes
                     mainColor: rarity.color,
                     accentColor: rarity.color,
                     glowColor: rarity.glow,
@@ -189,11 +225,9 @@
                 });
             }
 
-            // Generate 50 new, complex ships
             for (let i = 10; i < 60; i++) {
-                const rarityKey = rarityKeys[Math.floor((i - 10) / 5) + 2] || rarityKeys[rarityKeys.length - 1]; // Cycle through higher rarities
+                const rarityKey = rarityKeys[Math.floor((i - 10) / 5) + 2] || rarityKeys[rarityKeys.length - 1];
                 const rarity = RARITIES[rarityKey];
-                
                 const randColor = () => '#' + (Math.random() * 0xFFFFFF << 0).toString(16).padStart(6, '0');
 
                 ships.push({
@@ -203,14 +237,13 @@
                     multiplier: rarity.multiplier + Math.floor(Math.random() * 5),
                     price: rarity.basePrice * (2 + (i - 10) * 0.5),
                     damage: Math.max(5, Math.floor((rarity.multiplier + 5) * 10 * (1 + (i - 10) * 0.1))),
-                    
                     mainColor: randColor(),
                     accentColor: randColor(),
                     glowColor: rarity.glow,
                     engineColor: randColor(),
                     shape: SHAPE_TYPES[Math.floor(Math.random() * SHAPE_TYPES.length)],
-                    wingCount: Math.floor(Math.random() * 4) + 1, // 1 to 4
-                    engineCount: Math.floor(Math.random() * 5) + 1, // 1 to 5
+                    wingCount: Math.floor(Math.random() * 4) + 1,
+                    engineCount: Math.floor(Math.random() * 5) + 1,
                     sizeFactor: 1.5 + Math.random() * 0.5,
                     particleType: Math.floor(Math.random() * 4),
                 });
@@ -222,61 +255,46 @@
 
         const MAX_WEAPON_SLOTS = 10;
         const UPGRADE_DATA = [
-            { id: 'slot_2', name: 'Dual Cannon Slot', cost: 500, targetSlots: 2, color: '#ff4500' },
-            { id: 'slot_3', name: 'Triple Cannon Slot', cost: 1500, targetSlots: 3, color: '#ff8800' },
-            { id: 'slot_4', name: 'Quad Cannon Slot', cost: 4000, targetSlots: 4, color: '#ffff00' },
-            { id: 'slot_5', name: 'Penta Cannon Slot', cost: 10000, targetSlots: 5, color: '#39ff14' },
-            { id: 'slot_6', name: 'Hexa Cannon Slot', cost: 20000, targetSlots: 6, color: '#00ff7f' },
-            { id: 'slot_7', name: 'Hepta Cannon Slot', cost: 40000, targetSlots: 7, color: '#00bfff' },
-            { id: 'slot_8', name: 'Octa Cannon Slot', cost: 75000, targetSlots: 8, color: '#9932cc' },
-            { id: 'slot_9', name: 'Nona Cannon Slot', cost: 150000, targetSlots: 9, color: '#ff00ff' },
-            { id: 'slot_10', name: 'Deca Cannon Slot (MAX)', cost: 300000, targetSlots: 10, color: '#ff0066' },
+            { id: 'slot_2', name: 'Dual Cannon Slot', cost: 2500, targetSlots: 2, color: '#ff4500' },
+            { id: 'slot_3', name: 'Triple Cannon Slot', cost: 7500, targetSlots: 3, color: '#ff8800' },
+            { id: 'slot_4', name: 'Quad Cannon Slot', cost: 20000, targetSlots: 4, color: '#ffff00' },
+            { id: 'slot_5', name: 'Penta Cannon Slot', cost: 50000, targetSlots: 5, color: '#39ff14' },
+            { id: 'slot_6', name: 'Hexa Cannon Slot', cost: 100000, targetSlots: 6, color: '#00ff7f' },
+            { id: 'slot_7', name: 'Hepta Cannon Slot', cost: 200000, targetSlots: 7, color: '#00bfff' },
+            { id: 'slot_8', name: 'Octa Cannon Slot', cost: 400000, targetSlots: 8, color: '#9932cc' },
+            { id: 'slot_9', name: 'Nona Cannon Slot', cost: 750000, targetSlots: 9, color: '#ff00ff' },
+            { id: 'slot_10', name: 'Deca Cannon Slot (MAX)', cost: 1500000, targetSlots: 10, color: '#ff0066' },
         ];
-
-
-        // --- AUDIO FUNCTIONS ---
-
-        async function initializeTone() {
-            if (isToneInitialized) return;
-            try {
-                await Tone.start();
-                isToneInitialized = true;
-                createSynths();
-                audioUnlocked = true;
-            } catch (e) {
-                isToneInitialized = true;
-                audioUnlocked = false;
-            }
-        }
-        function createSynths() {
-            noiseSynth = new Tone.NoiseSynth({ noise:{type:'white'}, envelope:{attack:0.001,decay:0.15,sustain:0.01,release:0.15} }).toDestination();
-            laserSynth = new Tone.Synth({ oscillator:{type:"square"}, envelope:{attack:0.005,decay:0.1,sustain:0,release:0.1}, volume:-15 }).toDestination();
-            enemyLaserSynth = new Tone.Synth({ oscillator:{type:"sawtooth"}, envelope:{attack:0.005,decay:0.1,sustain:0,release:0.1}, volume:-18, detune:-200 }).toDestination();
-            hitSynth   = new Tone.MembraneSynth({ volume:-18, pitchDecay:0.01, octaves:2, envelope:{attack:0.001,decay:0.1,sustain:0.01,release:0.05} }).toDestination();
-            lifeLostSynth = new Tone.DuoSynth({ volume:-10, voice0:{oscillator:{type:'sawtooth'},envelope:{attack:0.01,decay:0.5,sustain:0.05,release:0.1}}, voice1:{oscillator:{type:'square'},envelope:{attack:0.01,decay:0.1,sustain:0.05,release:0.1},filterEnvelope:{baseFrequency:600,octaves:3,exponent:1}}}).toDestination();
-        }
-        function disposeSynths() {
-            [noiseSynth, laserSynth, hitSynth, enemyLaserSynth, lifeLostSynth].forEach(s => s && s.dispose && s.dispose());
-            noiseSynth = laserSynth = hitSynth = enemyLaserSynth = lifeLostSynth = null;
-        }
-        function playGameOverSound(){ if(audioUnlocked && noiseSynth) noiseSynth.triggerAttackRelease("2n"); }
-        function playLaserSound(){ if(audioUnlocked && laserSynth) laserSynth.triggerAttackRelease("C6","16n"); }
-        function playEnemyLaserSound(){ if(audioUnlocked && enemyLaserSynth) enemyLaserSynth.triggerAttackRelease("E3","16n"); }
-        function playHitSound(){
-            const now = performance.now();
-            if(now - lastHitSoundTime < 50) return;
-            if(audioUnlocked && hitSynth) hitSynth.triggerAttackRelease("C3","32n");
-            lastHitSoundTime = now;
-        }
-        function playLifeLostSound(){ if(audioUnlocked && lifeLostSynth) lifeLostSynth.triggerAttackRelease("C2","4n"); }
 
         // --- UI & SHOP FUNCTIONS ---
 
+        function updateNextShipPrice() {
+            const unownedShips = SHIP_DATA.filter(s => !ownedShipIds.includes(s.id));
+            if (unownedShips.length > 0) {
+                unownedShips.sort((a, b) => a.price - b.price);
+                nextShipPrice = unownedShips[0].price;
+            } else {
+                nextShipPrice = Infinity; 
+            }
+        }
+
         function updateCoinDisplay(){
-            coinDisplay.textContent = `COINS: ${coins + sessionCoins}`;
+            const currentTotal = coins + sessionCoins;
+            coinDisplay.textContent = `COINS: ${currentTotal}`;
             livesDisplay.textContent = `LIVES: ${playerLives}`;
+            waveDisplay.textContent = `WAVE: ${currentWave}`;
+            
+            if (currentTotal >= nextShipPrice && nextShipPrice !== Infinity) {
+                affordDisplay.classList.add('afford-visible');
+                const ship = SHIP_DATA.find(s => s.price === nextShipPrice && !ownedShipIds.includes(s.id));
+                if(ship) affordDisplay.textContent = `AFFORDABLE: ${ship.name}`;
+            } else {
+                affordDisplay.classList.remove('afford-visible');
+            }
+
             if(shopCoinBalance) shopCoinBalance.textContent = coins.toLocaleString();
         }
+
         function showShop(){
             standardOverlay.style.display='none';
             shopContainer.style.display='grid';
@@ -353,7 +371,6 @@
                 card.style.setProperty('--glow-color', ship.glowColor);
                 card.dataset.glow = ship.glowColor;
 
-                // Simple SVG placeholder for the ship's color scheme
                 const shipSvg = `
                     <svg class="w-12 h-12" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
                         <defs>
@@ -386,6 +403,7 @@
         function attemptPurchase(id,price){
             if(coins>=price){
                 coins-=price; ownedShipIds.push(id); equipShip(id);
+                updateNextShipPrice(); 
                 const msg=document.getElementById(`msg-${id}`);
                 if(msg){ msg.textContent='Purchased & Equipped!'; msg.className='text-xs text-green-400 mt-2 h-4'; setTimeout(()=>msg.textContent='',2000); }
             }else{
@@ -397,7 +415,6 @@
         function equipShip(id){
             if(ownedShipIds.includes(id)){
                 equippedShipId=id; renderShop();
-                // Update CSS variables for player ship display
                 const cur=SHIP_DATA.find(s=>s.id===equippedShipId);
                 document.documentElement.style.setProperty('--player-color', cur.mainColor);
                 document.documentElement.style.setProperty('--player-glow', cur.glowColor);
@@ -415,7 +432,7 @@
         }
 
         async function startGame(){
-            await initializeTone();
+            initAudio();
             resizeCanvas();
             player.x=canvas.width/2; player.y=canvas.height*0.85;
             player.dx=player.dy=player.rotation=0; player.particles=[];
@@ -424,8 +441,13 @@
             playerLives = INITIAL_PLAYER_LIVES; 
             score=0; sessionCoins=0;
             lastTime=performance.now(); lastCoinUpdateTime=lastTime; lastHitSoundTime=0;
-            spawnTimer=spawnInterval; keys={};
+            spawnTimer=0; keys={};
+
+            currentWave = 1;
+            killsInCurrentWave = 0;
             
+            updateNextShipPrice();
+
             const cur=SHIP_DATA.find(s=>s.id===equippedShipId);
             document.documentElement.style.setProperty('--player-color', cur.mainColor);
             document.documentElement.style.setProperty('--player-glow', cur.glowColor);
@@ -433,11 +455,14 @@
             overlay.classList.remove('game-over-visible'); overlay.style.display='none';
             gameRunning=true;
             updateCoinDisplay(); 
-            requestAnimationFrame(gameLoop);
+            
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+            animationFrameId = requestAnimationFrame(gameLoop);
         }
 
         function initStartScreen(){
             toggleConsole(false);
+            updateNextShipPrice();
 
             resizeCanvas(); draw(); updateCoinDisplay();
             shopContainer.style.display='none'; standardOverlay.style.display='flex';
@@ -450,32 +475,36 @@
         }
 
         function loseLife() {
-            if (player.isInvulnerable) return;
+            if (player.isInvulnerable || !gameRunning) return;
 
             playerLives--;
-            playLifeLostSound();
+            
+            if (playerLives <= 0) {
+                playerLives = 0;
+                gameOver();
+                return; 
+            }
+
             player.isInvulnerable = true;
             player.invulnTimer = PLAYER_INVULNERABILITY_TIME;
-            
             updateCoinDisplay();
-
-            // Clear all projectiles for a clean restart
             projectiles = [];
             enemyProjectiles = [];
-
-            if (playerLives <= 0) {
-                gameOver();
-            }
         }
 
         function gameOver(){
-            gameRunning=false; playGameOverSound(); disposeSynths();
-            coins+=sessionCoins;
+            if (!gameRunning) return; 
+            gameRunning = false;
+            
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+            animationFrameId = null;
+
+            coins += sessionCoins;
             shopContainer.style.display='none'; standardOverlay.style.display='flex';
             overlayTitle.textContent='DEFEAT';
             overlayTitle.className='text-6xl mb-4 font-extrabold tracking-widest text-red-500 animate-pulse';
             const ship=SHIP_DATA.find(s=>s.id===equippedShipId);
-            overlayMessage.textContent=`You survived for ${score.toFixed(2)} seconds and earned ${sessionCoins} new coins (${ship.multiplier}x multiplier).`;
+            overlayMessage.textContent=`Survived ${score.toFixed(2)}s | Waves Defeated: ${currentWave-1}`;
             totalCoinsMessage.textContent=`TOTAL BALANCE: ${coins.toLocaleString()} COINS`;
             actionButton.textContent='RESTART ARENA';
             overlay.style.display='flex'; overlay.classList.add('game-over-visible');
@@ -485,10 +514,25 @@
         // --- ENEMY LOGIC ---
 
         function spawnEnemy(){
-            const size=ENEMY_RADIUS + Math.random()*15;
-            const health=Math.max(5,Math.floor(size*2));
-            const enemySpeed = 1.0 + Math.min(score/60, 3.0);
+            if (!gameRunning) return;
+            const waveMultiplier = 1 + (currentWave * 0.20); 
+            const baseSize = ENEMY_RADIUS + Math.random()*15;
+            const size = baseSize;
+            const health = Math.max(2, Math.floor((size * 0.5) * waveMultiplier));
             
+            const enemySpeed = 1.0 + Math.min(score/60, 3.0);
+            const damage = Math.max(1, Math.floor(enemySpeed * 2) + (currentWave * 2)); 
+
+            const visuals = [
+                { c: '#800080', g: '#ff00ff' }, 
+                { c: '#8b0000', g: '#ff0000' }, 
+                { c: '#006400', g: '#39ff14' }, 
+                { c: '#00008b', g: '#00bfff' }, 
+                { c: '#b8860b', g: '#ffd700' }, 
+                { c: '#000000', g: '#ffffff' }  
+            ];
+            const style = visuals[(currentWave - 1) % visuals.length];
+
             enemies.push({
                 x:Math.random()*(canvas.width-size*2)+size, 
                 y:-size, 
@@ -498,15 +542,14 @@
                 maxHealth: health,
                 shotCooldown: 2000 + Math.random() * 2000 - Math.min(score*10, 1500),
                 shootTimer: 0,
-                color: '#800080', // Purple
-                glow: '#ff00ff', // Magenta
-                damage: Math.max(1, Math.floor(enemySpeed * 2)),
+                color: style.c, 
+                glow: style.g, 
+                damage: damage,
             });
         }
 
         function spawnEnemyProjectile(enemy){
             if(!gameRunning || isConsoleOpen) return;
-            playEnemyLaserSound();
             
             const dx = player.x - enemy.x;
             const dy = player.y - enemy.y;
@@ -532,20 +575,21 @@
             if(!gameRunning || isConsoleOpen) return;
             const ship=SHIP_DATA.find(s=>s.id===equippedShipId);
             if(!ship) return;
-            playLaserSound();
+            
+            // Play sound
+            playSound('shoot');
 
             const damage = ship.damage;
             const color = ship.glowColor;
             const speed = 15;
             const radius = 4;
 
-            const cannonPositionSpread = 15; // X-distance between cannon barrels
+            const cannonPositionSpread = 15; 
 
             for (let i = 0; i < weaponSlots; i++) {
                 const positionOffset = (i - (weaponSlots - 1) / 2) * cannonPositionSpread;
                 const angleOffset = (i - (weaponSlots - 1) / 2) * SPREAD_ANGLE_RADIANS;
                 
-                // Direction vector pointing forward (negative Y) with spread
                 const vx = Math.sin(angleOffset);      
                 const vy = -Math.cos(angleOffset);     
 
@@ -569,15 +613,12 @@
             if(!ship || ship.particleType===0){ player.particles=[]; return; }
             const halfSize = PLAYER_SIZE * ship.sizeFactor * 0.5;
 
-            // Generate particles from engine points
             const enginePositions = ship.engineCount === 1 ? [0] : Array.from({length: ship.engineCount}, (_, i) => (i - (ship.engineCount - 1) / 2) * (halfSize * 0.6 / (ship.engineCount - 1 || 1)));
 
             if(Math.random()<0.8){
                 enginePositions.forEach(offsetX => {
                     const a = player.rotation;
                     const len = halfSize * 1.5;
-
-                    // Particle start position relative to player center
                     const px = offsetX * Math.cos(a) + len * Math.sin(a); 
                     const py = -offsetX * Math.sin(a) + len * Math.cos(a);
 
@@ -602,9 +643,10 @@
         }
 
         function updateGameObjects(delta){
+            if (!gameRunning) return; 
+
             const deltaFactor = delta/16.67;
 
-            // Player Invulnerability
             if (player.isInvulnerable) {
                 player.invulnTimer -= delta;
                 if (player.invulnTimer <= 0) {
@@ -612,36 +654,31 @@
                 }
             }
 
-            // Enemies Update
             spawnTimer-=delta;
-            if(spawnTimer<=0){ 
+            const maxEnemies = Math.min(20, 1 + currentWave);
+            
+            if(spawnTimer<=0 && enemies.length < maxEnemies){ 
                 spawnEnemy(); 
-                const speedFactor = 1.0+Math.min(score/50,4.0);
-                spawnInterval=Math.max(2000-score*10,500); 
-                spawnTimer=spawnInterval; 
+                spawnTimer=1000; 
             }
 
             for(let i=enemies.length-1;i>=0;i--){
                 const e=enemies[i];
-                
-                // Movement (basic vertical descent)
                 e.y+=e.speed*deltaFactor;
                 if(e.y-e.radius>canvas.height){ enemies.splice(i,1); continue; }
                 
-                // Shooting
                 e.shootTimer -= delta;
                 if (e.shootTimer <= 0) {
                     spawnEnemyProjectile(e);
                     e.shootTimer = e.shotCooldown;
                 }
 
-                // Collision Check (Player vs. Enemy Ship)
                 if(!player.isInvulnerable && checkCollision(player, e)){ 
-                    loseLife(); 
+                    loseLife();
+                    if(!gameRunning) return; 
                 }
             }
 
-            // Player Projectiles Update
             for(let i=projectiles.length-1;i>=0;i--){
                 const p=projectiles[i];
                 p.x += p.vx * p.speed * deltaFactor; 
@@ -654,10 +691,20 @@
                     const e=enemies[j];
                     const d=Math.hypot(p.x-e.x,p.y-e.y);
                     if(d<(p.radius+e.radius)){
-                        hit=true; e.health-=p.damage; playHitSound();
+                        hit=true; e.health-=p.damage; 
+                        
                         if(e.health<=0){
-                            const reward=Math.ceil(e.maxHealth/3);
-                            sessionCoins+=reward; updateCoinDisplay(); enemies.splice(j,1);
+                            playSound('hit');
+                            const reward = 20;
+                            sessionCoins+=reward; 
+                            enemies.splice(j,1);
+
+                            killsInCurrentWave++;
+                            if (killsInCurrentWave >= KILLS_TO_ADVANCE_WAVE) {
+                                currentWave++;
+                                killsInCurrentWave = 0;
+                            }
+                            updateCoinDisplay();
                         }
                         break;
                     }
@@ -665,21 +712,19 @@
                 if(hit) projectiles.splice(i,1);
             }
 
-            // Enemy Projectiles Update
             for(let i=enemyProjectiles.length-1;i>=0;i--){
                 const ep=enemyProjectiles[i];
                 ep.x += ep.vx * ep.speed * deltaFactor; 
                 ep.y += ep.vy * ep.speed * deltaFactor;
 
-                // Check out of bounds (top/sides for player shots, all for enemy shots)
                 if(ep.y+ep.radius<0 || ep.x+ep.radius<0 || ep.x-ep.radius>canvas.width || ep.y-ep.radius>canvas.height){ 
                     enemyProjectiles.splice(i,1); continue; 
                 }
 
-                // Check collision with Player
                 if(!player.isInvulnerable && checkCollision(player, ep)){
                     loseLife();
-                    enemyProjectiles.splice(i,1); // Remove enemy projectile on hit
+                    if(!gameRunning) return; // <-- FIX ADDED HERE
+                    enemyProjectiles.splice(i,1); 
                 }
             }
         }
@@ -690,11 +735,6 @@
             score+=sec; scoreDisplay.textContent=`TIME: ${score.toFixed(2)}s`;
             const ship=SHIP_DATA.find(s=>s.id===equippedShipId);
             const mult=ship?ship.multiplier:1;
-
-            if(now-lastCoinUpdateTime>=1000){
-                const secs=Math.floor((now-lastCoinUpdateTime)/1000);
-                sessionCoins+=mult*secs; lastCoinUpdateTime+=secs*1000; updateCoinDisplay();
-            }
 
             let mx=0,my=0;
             if(keys['w']||keys['W']||keys['ArrowUp']) my=-1;
@@ -718,14 +758,14 @@
         // --- DRAWING COMPONENTS ---
 
         function checkCollision(p1,p2){
-            const r1 = p1.radius || PLAYER_SIZE/2; // Player radius or projectile radius
-            const r2 = p2.radius || PLAYER_SIZE/2; // Enemy radius or projectile radius
+            if (!gameRunning) return false;
+            const r1 = p1.radius || PLAYER_SIZE/2; 
+            const r2 = p2.radius || PLAYER_SIZE/2; 
             return Math.hypot(p1.x-p2.x,p1.y-p2.y) < (r1 + r2);
         }
 
-        // Complex drawing function for any ship (player or enemy)
         function drawShip(ctx, ship, x, y, rotation, isPlayer = false, playerInvuln = false){
-            const r = PLAYER_SIZE * ship.sizeFactor * 0.5; // Ship body radius
+            const r = PLAYER_SIZE * ship.sizeFactor * 0.5; 
             const glow = ship.glowColor;
             const engine = ship.engineColor;
             const main = ship.mainColor;
@@ -735,10 +775,9 @@
             ctx.translate(x,y);
             ctx.rotate(rotation);
 
-            // Optional: Draw player particles
             if (isPlayer) {
                 if(playerInvuln && Math.floor(player.invulnTimer / 100) % 2 === 0) {
-                    ctx.globalAlpha = 0.5; // Flash effect
+                    ctx.globalAlpha = 0.5; 
                 }
                 player.particles.forEach(p=>{
                     ctx.globalAlpha=p.life/100;
@@ -750,7 +789,6 @@
                 ctx.globalAlpha=1;
             }
 
-            // 1. Draw Engine Thrusters (Glow and Shape)
             ctx.shadowColor=engine; ctx.shadowBlur=15;
             ctx.fillStyle=engine;
             const engineWidth = r * 0.3;
@@ -764,7 +802,6 @@
             });
             ctx.shadowBlur=0;
 
-            // 2. Draw Main Hull & Wings
             ctx.shadowColor=glow; ctx.shadowBlur=20;
             ctx.fillStyle=main;
             
@@ -784,7 +821,7 @@
                     ctx.lineTo(-r*1.2, r*0.5);
                     break;
                 case 'CRUCIFORM':
-                    ctx.rect(-r*0.4, -r*1.2, r*0.8, r*2.4); // Main body
+                    ctx.rect(-r*0.4, -r*1.2, r*0.8, r*2.4);
                     ctx.moveTo(-r*1.5, r*0.5);
                     ctx.lineTo(-r*0.4, r*0.1);
                     ctx.lineTo(-r*0.4, r*0.9);
@@ -831,7 +868,6 @@
             ctx.fill();
             ctx.shadowBlur=0;
 
-            // 3. Draw Cockpit/Accent
             ctx.fillStyle=accent;
             ctx.beginPath();
             ctx.rect(-r*0.3, -r*1.0, r*0.6, r*0.8);
@@ -843,18 +879,16 @@
         function drawEnemy(enemy){
             const r = enemy.radius;
             const dmg=enemy.health/enemy.maxHealth;
-            const pulse = (Math.sin(performance.now() / 150) * 0.1 + 1); // Simple pulse effect
+            const pulse = (Math.sin(performance.now() / 150) * 0.1 + 1); 
 
             ctx.save();
             ctx.translate(enemy.x, enemy.y);
 
-            // 1. Draw Health Bar
             ctx.fillStyle='#0d1117';
             ctx.fillRect(-r, -r-10, r*2, 6);
             ctx.fillStyle=dmg>0.5?'#39ff14':dmg>0.2?'#ffff00':'#ff0000';
             ctx.fillRect(-r, -r-10, r*2*dmg, 6);
 
-            // 2. Draw Ship (simple design for enemies)
             ctx.shadowColor=enemy.glow; ctx.shadowBlur=20;
             ctx.fillStyle=enemy.color;
             
@@ -862,12 +896,12 @@
             ctx.arc(0, 0, r, 0, Math.PI*2);
             ctx.fill();
             
-            ctx.fillStyle='#0d1117'; // Cockpit
+            ctx.fillStyle='#0d1117'; 
             ctx.beginPath();
             ctx.arc(0, 0, r*0.5, 0, Math.PI*2);
             ctx.fill();
 
-            ctx.fillStyle=enemy.glow; // Cannon
+            ctx.fillStyle=enemy.glow; 
             ctx.beginPath();
             ctx.rect(-r*0.1, r*0.5, r*0.2, r*0.4*pulse);
             ctx.fill();
@@ -877,10 +911,10 @@
 
 
         function draw(){
+            if(!gameRunning) return;
             ctx.clearRect(0,0,canvas.width,canvas.height);
             ctx.fillStyle='#161b22'; ctx.fillRect(0,0,canvas.width,canvas.height);
 
-            // Draw Projectiles (Player & Enemy)
             projectiles.forEach(p=>{
                 ctx.fillStyle=p.color; ctx.shadowColor=p.color; ctx.shadowBlur=10;
                 ctx.beginPath(); ctx.arc(p.x,p.y,p.radius,0,Math.PI*2); ctx.fill();
@@ -891,20 +925,22 @@
             });
             ctx.shadowBlur=0;
 
-            // Draw Enemies
             enemies.forEach(e => drawEnemy(e));
 
-            // Draw Player
             const currentShip = SHIP_DATA.find(s=>s.id===equippedShipId);
             drawShip(ctx, currentShip, player.x, player.y, player.rotation, true, player.isInvulnerable);
         }
 
         function gameLoop(t){
             if(!gameRunning || isConsoleOpen) return;
-            update(t); draw(); requestAnimationFrame(gameLoop);
+            update(t); 
+            if(gameRunning) { 
+                draw(); 
+                animationFrameId = requestAnimationFrame(gameLoop);
+            }
         }
 
-        // --- CONSOLE LOGIC (Keep for cheating) ---
+        // --- CONSOLE LOGIC ---
 
         function toggleConsole(open) {
             if (open !== undefined) { isConsoleOpen = open; } else { isConsoleOpen = !isConsoleOpen; }
