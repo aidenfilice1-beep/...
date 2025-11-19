@@ -125,7 +125,7 @@
         // --- GAME CONSTANTS ---
         const INITIAL_PLAYER_LIVES = 3;
         const PLAYER_SIZE = 25;
-        const ENEMY_RADIUS = 30;
+        const ENEMY_RADIUS = 30; // Base size for enemy generation
         const ROTATION_SPEED = 0.15;
         const MAX_ROTATION = Math.PI / 8;
         const SPREAD_ANGLE_RADIANS = 0.05; 
@@ -140,7 +140,7 @@
         let enemies = [], projectiles = [], enemyProjectiles = [];
         let score = 0, lastTime = 0, spawnTimer = 0; 
         let keys = {};
-        let screenFlashTimer = 0; // NEW: Timer for the red screen flash
+        let screenFlashTimer = 0; // Timer for the red screen flash
 
         // --- NEW SIMPLE AUDIO SYSTEM ---
         let audioCtx = null;
@@ -482,7 +482,7 @@
 
             playerLives--;
             
-            // NEW: Start the screen flash timer
+            // Start the screen flash timer
             screenFlashTimer = DAMAGE_FLASH_TIME; 
             
             if (playerLives <= 0) {
@@ -523,7 +523,8 @@
             if (!gameRunning) return;
             const waveMultiplier = 1 + (currentWave * 0.20); 
             const baseSize = ENEMY_RADIUS + Math.random()*15;
-            const size = baseSize;
+            const size = baseSize; // Visual base size
+
             const health = Math.max(2, Math.floor((size * 0.5) * waveMultiplier));
             
             const enemySpeed = 1.0 + Math.min(score/60, 3.0);
@@ -538,19 +539,32 @@
                 { c: '#000000', g: '#ffffff' }  
             ];
             const style = visuals[(currentWave - 1) % visuals.length];
+            
+            // --- ADD RANDOM SHIP VISUAL PROPERTIES ---
+            const shipData = SHIP_DATA[Math.floor(Math.random() * SHIP_DATA.length)];
+            const sizeFactor = 0.8 + Math.random() * 0.4;
+            // --- END RANDOM SHIP VISUAL PROPERTIES ---
 
             enemies.push({
                 x:Math.random()*(canvas.width-size*2)+size, 
                 y:-size, 
-                radius: size, 
+                radius: size*0.5, // Collision radius
                 speed: enemySpeed, 
                 health, 
                 maxHealth: health,
                 shotCooldown: 2000 + Math.random() * 2000 - Math.min(score*10, 1500),
                 shootTimer: 0,
-                color: style.c, 
-                glow: style.g, 
                 damage: damage,
+                
+                // Ship drawing properties (reusing player ship structure)
+                mainColor: style.c, 
+                accentColor: style.c, 
+                glowColor: style.g, 
+                engineColor: style.g,
+                shape: shipData.shape, 
+                wingCount: shipData.wingCount,
+                engineCount: shipData.engineCount,
+                sizeFactor: sizeFactor, // Visual scale factor
             });
         }
 
@@ -569,7 +583,7 @@
                 radius: 4,
                 speed: 8,
                 damage: enemy.damage,
-                color: enemy.glow,
+                color: enemy.glowColor, // Use glowColor for projectile
                 vx: vx, 
                 vy: vy, 
             });
@@ -617,7 +631,9 @@
         function updateParticles(delta){
             const ship=SHIP_DATA.find(s=>s.id===equippedShipId);
             if(!ship || ship.particleType===0){ player.particles=[]; return; }
-            const halfSize = PLAYER_SIZE * ship.sizeFactor * 0.5;
+            
+            // Use the effective visual size for particle engine placement
+            const halfSize = (PLAYER_SIZE * 0.5) * ship.sizeFactor; 
 
             const enginePositions = ship.engineCount === 1 ? [0] : Array.from({length: ship.engineCount}, (_, i) => (i - (ship.engineCount - 1) / 2) * (halfSize * 0.6 / (ship.engineCount - 1 || 1)));
 
@@ -660,7 +676,7 @@
                 }
             }
             
-            // NEW: Decrement the screen flash timer
+            // Decrement the screen flash timer
             if (screenFlashTimer > 0) {
                 screenFlashTimer -= delta;
                 if (screenFlashTimer < 0) screenFlashTimer = 0;
@@ -685,10 +701,9 @@
                     e.shootTimer = e.shotCooldown;
                 }
 
-                // --- CRASH FIX 1: Enemy collision ---
                 if(!player.isInvulnerable && checkCollision(player, e)){ 
                     loseLife();
-                    return; // Return immediately to prevent array manipulation after reset in loseLife()
+                    return; 
                 }
             }
 
@@ -734,10 +749,9 @@
                     enemyProjectiles.splice(i,1); continue; 
                 }
 
-                // --- CRASH FIX 2: Enemy projectile collision ---
                 if(!player.isInvulnerable && checkCollision(player, ep)){
                     loseLife();
-                    return; // Return immediately to prevent array manipulation after reset in loseLife()
+                    return; 
                 }
             }
         }
@@ -772,13 +786,25 @@
 
         function checkCollision(p1,p2){
             if (!gameRunning) return false;
+            // Player collision radius is always PLAYER_SIZE/2 (which is 12.5)
             const r1 = p1.radius || PLAYER_SIZE/2; 
             const r2 = p2.radius || PLAYER_SIZE/2; 
             return Math.hypot(p1.x-p2.x,p1.y-p2.y) < (r1 + r2);
         }
 
-        function drawShip(ctx, ship, x, y, rotation, isPlayer = false, playerInvuln = false){
-            const r = PLAYER_SIZE * ship.sizeFactor * 0.5; 
+        /**
+         * Draws a ship shape using its properties.
+         * @param {CanvasRenderingContext2D} ctx - The canvas context.
+         * @param {object} ship - The ship data object (player or enemy).
+         * @param {number} x - X coordinate.
+         * @param {number} y - Y coordinate.
+         * @param {number} rotation - Rotation angle.
+         * @param {number} visualSize - The radius/scaling factor for the ship drawing.
+         * @param {boolean} isPlayer - True if drawing the player ship.
+         * @param {boolean} playerInvuln - True if player is invulnerable.
+         */
+        function drawShip(ctx, ship, x, y, rotation, visualSize, isPlayer = false, playerInvuln = false){
+            const r = visualSize; // Use visualSize as the effective radius for drawing
             const glow = ship.glowColor;
             const engine = ship.engineColor;
             const main = ship.mainColor;
@@ -802,6 +828,7 @@
                 ctx.globalAlpha=1;
             }
 
+            // Engine Drawing
             ctx.shadowColor=engine; ctx.shadowBlur=15;
             ctx.fillStyle=engine;
             const engineWidth = r * 0.3;
@@ -815,6 +842,7 @@
             });
             ctx.shadowBlur=0;
 
+            // Main Body Drawing
             ctx.shadowColor=glow; ctx.shadowBlur=20;
             ctx.fillStyle=main;
             
@@ -890,36 +918,25 @@
         }
 
         function drawEnemy(enemy){
-            const r = enemy.radius;
+            // enemy.radius is the collision radius
+            // Calculate a visual scale based on the collision radius and size factor
+            const visualScale = enemy.radius * enemy.sizeFactor; 
             const dmg=enemy.health/enemy.maxHealth;
-            const pulse = (Math.sin(performance.now() / 150) * 0.1 + 1); 
-
+            
+            // Health bar drawing
             ctx.save();
             ctx.translate(enemy.x, enemy.y);
 
             ctx.fillStyle='#0d1117';
-            ctx.fillRect(-r, -r-10, r*2, 6);
+            ctx.fillRect(-visualScale, -visualScale - 10, visualScale*2, 6);
             ctx.fillStyle=dmg>0.5?'#39ff14':dmg>0.2?'#ffff00':'#ff0000';
-            ctx.fillRect(-r, -r-10, r*2*dmg, 6);
-
-            ctx.shadowColor=enemy.glow; ctx.shadowBlur=20;
-            ctx.fillStyle=enemy.color;
+            ctx.fillRect(-visualScale, -visualScale - 10, visualScale*2*dmg, 6);
             
-            ctx.beginPath();
-            ctx.arc(0, 0, r, 0, Math.PI*2);
-            ctx.fill();
-            
-            ctx.fillStyle='#0d1117'; 
-            ctx.beginPath();
-            ctx.arc(0, 0, r*0.5, 0, Math.PI*2);
-            ctx.fill();
-
-            ctx.fillStyle=enemy.glow; 
-            ctx.beginPath();
-            ctx.rect(-r*0.1, r*0.5, r*0.2, r*0.4*pulse);
-            ctx.fill();
-
             ctx.restore();
+
+            // Call the shared drawing function to draw the ship shape
+            // Enemies have 0 rotation
+            drawShip(ctx, enemy, enemy.x, enemy.y, 0, visualScale, false, false);
         }
 
 
@@ -941,9 +958,10 @@
             enemies.forEach(e => drawEnemy(e));
 
             const currentShip = SHIP_DATA.find(s=>s.id===equippedShipId);
-            drawShip(ctx, currentShip, player.x, player.y, player.rotation, true, player.isInvulnerable);
+            const visualSize = (PLAYER_SIZE * 0.5) * currentShip.sizeFactor; // Calculate visual size for player
+            drawShip(ctx, currentShip, player.x, player.y, player.rotation, visualSize, true, player.isInvulnerable);
             
-            // NEW: Draw red flash overlay
+            // Draw red flash overlay
             if (screenFlashTimer > 0) {
                 const maxAlpha = 0.5; // Max transparency
                 // Fades out from 0.5 opacity over the flash time
